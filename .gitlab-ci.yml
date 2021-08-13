@@ -1,0 +1,18 @@
+merge-mirror:
+  tags:
+    - ngc
+  script:
+    - git checkout --track origin/sync-ci || true
+    - git reset --hard origin/sync-ci
+    - git config --local user.name 'SyncAction'
+    - git config --local user.email 'sync@nowhere'
+    - git remote add mirror ssh://git@gitlab-master.nvidia.com:12051/legate/legate.core.mirror.git || true
+    - git branch -a
+    - ./merge-branches.sh mirror
+    - git remote show origin
+    - git remote set-url --push origin ssh://git@gitlab-master.nvidia.com:12051/legate/legate.core.internal.git
+    - git remote show origin
+    - git push origin --tags refs/heads/*
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: always
