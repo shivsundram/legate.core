@@ -217,7 +217,7 @@ class Task(Operation):
 
         if self._is_fused:
             launcher.add_fusion_metadata(self._is_fused, self._fusion_metadata)
-        if  self._is_fused: #fused ops re-use encapsulated unfused partitions
+        if  False or self._is_fused: #fused ops re-use encapsulated unfused partitions
             input_parts = self._unfused_input_parts
             output_parts = self._unfused_output_parts
             reduction_parts = self._unfused_reduction_parts
@@ -238,7 +238,7 @@ class Task(Operation):
             launcher.add_output(output, proj, tag=tag)
             partition = strategy.get_partition(output_part)
             # We update the key partition of a store only when it gets updated
-            output.set_key_partition(partition)
+            #output.set_key_partition(partition)
         for ((reduction, redop), reduction_part) in zip(
             self._reductions, reduction_parts
         ):

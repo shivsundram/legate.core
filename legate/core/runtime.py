@@ -46,7 +46,7 @@ from .shape import Shape
 from .solver import Partitioner, Strategy
 from .store import RegionField, Store, FusionMetadata
 import numpy as np
-
+from .constraints import Alignment
 
 
 
@@ -746,6 +746,67 @@ class FusionChecker(object):
         return fusable, final_set
 
     def can_fuse(self):
+        partitions = [] 
+        """
+        for op in self.ops:
+            for output, part in zip(op._outputs, op._output_parts):
+                output.reset_key_partition()
+                for input in op._inputs:
+                    input.reset_key_partition()
+        """
+
+        for op in self.ops:
+            must_be_single = any(len(gop.scalar_outputs) > 0 for gop in [op])
+            partitioner = Partitioner(self.runtime, [op], must_be_single=must_be_single)
+            self.partitioners.append( partitioner )
+            strategy = partitioner.partition_stores()
+            self.strategies.append(strategy)
+
+        windows = [(0, len(self.ops))]
+        for constraint in self.constraints:
+            windows = constraint.apply(self.contexts, self.runtime, self.ops, windows, self.partitioners, self.strategies)
+        
+        #print("windows", windows)
+        fusable,final_set = self.supress_small_fusions(windows, self.runtime._fusion_threshold)
+        """
+        allKeyed=True
+        for op in reversed(self.ops):
+            for output, part, in zip(op._outputs, op._output_parts):
+                if output._key_partition==None:
+                    allKeyed=False
+            for input in op._inputs:
+                if input._key_partition==None:
+                    allKeyed=False
+        if allKeyed:
+            fusable,final_set = self.supress_small_fusions(windows, self.runtime._fusion_threshold)
+            return fusable, final_set, self.strategies
+        """ 
+        ist=0
+        return fusable, final_set, self.strategies
+        """
+            for op in reversed(self.ops[ window[0]:window[1] ]):
+                strategy = old_strategies[ist]
+                local_partitions =  []
+                for output, part, in zip(op._outputs, op._output_parts):
+                    partition = strategy.get_partition(part)
+                    local_partitions.append(partition)
+                ist+=1
+                midpoint = int(len(local_partitions)/2)
+                partition = local_partitions[midpoint]
+                print("selected", partition)
+                for output, part, in zip(op._outputs, op._output_parts):
+                    #output.set_key_partition(partition)
+                    strategy._strategy[part] = partition
+                    key_part = partition
+                    #check if input and output should be aligned
+                    for input, ipart in zip(op._inputs, op._input_parts):
+                        if input.shape== output.shape:
+                            #input.set_key_partition(key_part)
+                            strategy._strategy[ipart] = partition
+                #self.strategies.append(strategy)
+        #self.strategies.reverse()
+        """
+        """
         for op in reversed(self.ops):
             must_be_single = any(len(gop.scalar_outputs) > 0 for gop in [op])
             partitioner = Partitioner(self.runtime, [op], must_be_single=must_be_single)
@@ -753,21 +814,16 @@ class FusionChecker(object):
             strategy = partitioner.partition_stores()
             for output, part, in zip(op._outputs, op._output_parts):
                 partition = strategy.get_partition(part)
+                #partition = partitions[15]
                 output.set_key_partition(partition)
                 key_part = partition
                 #check if input and output should be aligned
                 for input in op._inputs:
-                    if op.has_constraint(input, output):
+                    if input.shape== output.shape:
+                    #if op.has_constraint(input, output):
                         input.set_key_partition(key_part)
-            self.strategies.append(strategy)
-        self.strategies.reverse()
-
-        windows = [(0, len(self.ops))]
-        for constraint in self.constraints:
-            windows = constraint.apply(self.contexts, self.runtime, self.ops, windows, self.partitioners, self.strategies)
-  
-        fusable,final_set = self.supress_small_fusions(windows, self.runtime._fusion_threshold)
-        return fusable, final_set, self.strategies
+        #self.strategies.reverse()
+        """
 
 
 class FusionConstraint(object):
@@ -1176,7 +1232,8 @@ class Runtime(object):
     def build_fused_op(self,ops):
 
         fusion_checker = FusionChecker(ops, self._contexts, self)
-        fusion_checker.register_constraint(cuNumericContextExists())
+        #starttime = datetime.datetime.now()
+        #fusion_checker.register_constraint(cuNumericContextExists())
         fusion_checker.register_constraint(AllValidOps())
         fusion_checker.register_constraint(IdenticalLaunchShapes())
         fusion_checker.register_constraint(IdenticalProjection())
@@ -1185,6 +1242,7 @@ class Runtime(object):
                 
         super_strategies = []
         z=0
+        """
         for fusable_set in fusable_sets:   
             #create super strategy for this fusable set
             super_strat = {}
@@ -1196,7 +1254,13 @@ class Runtime(object):
                 super_fspace = {**(super_fspace.copy()), **partitions[j]._fspaces}
                 super_keystore = super_keystore.union(partitions[j]._key_parts)
             super_strategies.append(Strategy(partitions[start]._launch_shape, super_strat, super_fspace, super_keystore))
-       
+        """
+        #stop = datetime.datetime.now()
+        #delta=stop-starttime
+        #total = delta.total_seconds() * 1000.0
+        #print("time", total)
+
+        #starttime = datetime.datetime.now()
        
         #once fusion in the core is playing nicely with the mapepr
         #the following two lines will be removed, and be replaced 
@@ -1212,11 +1276,14 @@ class Runtime(object):
             start, end = fusable_set
             op_subset = ops[start:end]
             #if nothing to fuse, just use the original op
+            if end-start==0: 
+                continue
             if end-start==1:
                 normal_op = ops[start]
-                normal_op.strategy =  partitions[opID]._strategy#uper_strategies[i]
+                normal_op.strategy =  partitions[opID] #._strategy#uper_strategies[i]
                 new_op_list.append(normal_op)
                 opID+=1
+                #print("\nmaking single", normal_op._task_id)
             elif end-start > 1:
                 #initialize fused task
                 fused_task = numpy_context.create_task(fused_id)
@@ -1229,35 +1296,59 @@ class Runtime(object):
                 fused_task._unfused_input_parts = []
                 fused_task._unfused_output_parts = []
                 fused_task._unfused_reduction_parts = []
+                #print("\nmaking", fused_task._task_id)
                 for j,op in enumerate(op_subset):
+                    #print("sub optask_id",j,op._task_id)
+                    currStrategy = partitions[j]
                     for scalar in op._scalar_args:
                         fused_task.add_scalar_arg(scalar[0], ty.int32)
                     for (reduction, redop), part in zip(op._reductions, op._reduction_parts):
                         fused_task.add_reduction(reduction, redop)
-                        fused_task._unfused_reduction_parts.append(part)
+                        #fused_task._unfused_reduction_parts.append(part)
                     for input,part in zip(op._inputs, op._input_parts):
                         fused_task.add_input(input)   
-                        fused_task._unfused_input_parts.append(part)
+                        #fused_task._unfused_input_parts.append(part)
                     for output,part in zip(op._outputs, op._output_parts):
-                        fused_task.add_output(output)   
-                        fused_task._unfused_output_parts.append(part)
+                        fused_task.add_output(output) 
+                        #fused_task._unfused_output_parts.append(part)
                     for future in op._futures:
                         fused_task.add_future(future)
+                    for constraint in op._constraints:
+                        if (isinstance(constraint, Alignment)):
+                            fused_task.add_alignment(constraint._lhs.store, constraint._rhs.store)
                     opID+=1
                 new_op_list.append(fused_task)
+                #print("nout", len(fused_task._outputs))
+                #print("nin", len(fused_task._inputs))
+                #print("ndedup", len(set(fused_task._inputs+fused_task._outputs)))
+        #print("new op list", new_op_list)
         strats=[]
    
-        redoPar=False
+        redoPar=True
         for i,fused_task in enumerate(new_op_list):
-            if redoPar:
+            if redoPar and fused_task._is_fused:
+                #print("redo partition for", fused_task._task_id)
+                #print("output parts", fused_task._output_parts)
                 must_be_single = any(len(gop.scalar_outputs) > 0 for gop in [fused_task])
                 partitioner = Partitioner(self, [fused_task], must_be_single=must_be_single)
                 strategy = partitioner.partition_stores()
                 fused_task.strategy = strategy
                 strats.append(strategy)
+                #print(strategy)
+                #for output, part in zip(fused_task._outputs, fused_task._output_parts):
+                    #partition = strategy.get_partition(part)
+                    #print(partition)
             else:
-                fused_task.strategy = super_strategies[i]
-                strats.append( super_strategies[i])
+                strats.append(fused_task.strategy)
+            #else:
+            #    fused_task.strategy = super_strategies[i]
+            #    strats.append( super_strategies[i])
+
+        #stop = datetime.datetime.now()
+        #delta=stop-starttime
+        #total = delta.total_seconds() * 1000.0
+        #print("time2", total)
+
         return new_op_list, strats       
 
     def _launch_outstanding(self, force_eval=True):        
@@ -1283,6 +1374,8 @@ class Runtime(object):
         # them when testing fusion legality (in case 1)
         elif len(ops)==1 and self._clearing_pipe:
             strategy = ops[0].strategy
+            #print(ops[0]._task_id)
+            #print(strategy)
             ops[0].launch(strategy)
 
         # case 3: execute the ops normally 
