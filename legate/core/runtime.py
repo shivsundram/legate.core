@@ -758,7 +758,9 @@ class FusionChecker(object):
         windows = [(0, len(self.ops))]
         for constraint in self.constraints:
             windows = constraint.apply(self.contexts, self.runtime, self.ops, windows, self.partitioners, self.strategies)
+        keyps = []
 
+        #"""
         #for i,strategy in enumerate(self.strategies):
         #    print(i,"i", strategy)
         old_strategies = self.strategies[:]
@@ -767,7 +769,6 @@ class FusionChecker(object):
         #for i,strategy in enumerate(old_strategies):
         #    print(i,strategy)
         ist=0
-        keyps = []
         for window in reversed(windows):
             fusable,final_set = self.supress_small_fusions(windows, self.runtime._fusion_threshold)
             local_partitions =  []
@@ -804,7 +805,7 @@ class FusionChecker(object):
         self.strategies.reverse()
         keyps.reverse()
 
-      
+        #"""
         fusable,final_set = self.supress_small_fusions(windows, self.runtime._fusion_threshold)
         return fusable, final_set, self.strategies, keyps
 
@@ -840,6 +841,7 @@ class AllValidOps(FusionConstraint):
         self.validIDs.add(2) #Binary op
         self.validIDs.add(10) #Fill op
         self.validIDs.add(21) #Unary op
+        self.validIDs.add(5) #Convert op
 
     def apply(self, contexts, runtime, ops, baseIntervals, partitioners, strategies):
         fusable_intervals = []
@@ -1032,10 +1034,10 @@ class Runtime(object):
         # Legate operations.
         self._outstanding_ops = []
 
+        self._window_size=50
         self._window_size = self._core_context.get_tunable(
             legion.LEGATE_CORE_TUNABLE_WINDOW_SIZE,
             ty.uint32,)
-        self._window_size=50
         self._fusion_threshold =2
         #used for logging window and fusion lengths
         self._clearing_pipe = False
@@ -1312,6 +1314,8 @@ class Runtime(object):
                     must_be_single = any(len(gop.scalar_outputs) > 0 for gop in [op])
                     partitioner = Partitioner(self, [op], must_be_single=must_be_single)
                     strategy = partitioner.partition_stores()
+                    #print(op._task_id)
+                    #print(strategy)
                     strats.append(strategy)
             for i,op in enumerate(ops):
                 op.launch(strats[i])
