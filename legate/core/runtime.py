@@ -758,8 +758,10 @@ class FusionChecker(object):
         #if len(self.ops)>25:
         #    print("first strats", self.strategies[:5])
         windows = [(0, len(self.ops))]
+        triggers = []
         for constraint in self.constraints:
-            windows = constraint.apply(self.contexts, self.runtime, self.ops, windows, self.partitioners, self.strategies)
+            windows, nFires = constraint.apply(self.contexts, self.runtime, self.ops, windows, self.partitioners, self.strategies)
+            triggers.append(nFires)
         keyps = []
 
         #"""
@@ -816,7 +818,7 @@ class FusionChecker(object):
 
         #"""
         fusable,final_set = self.supress_small_fusions(windows, self.runtime._fusion_threshold)
-        return fusable, final_set, self.strategies, keyps
+        return fusable, final_set, self.strategies, keyps, triggers
 
 
 class FusionConstraint(object):
@@ -846,14 +848,44 @@ class AllValidOps(FusionConstraint):
     """
     def __init__(self):
         self.validIDs = set()
-        self.terminals = set()
         self.validIDs.add(2) #Binary op
         self.validIDs.add(10) #Fill op
         self.validIDs.add(21) #Unary op
         self.validIDs.add(23) #where op
         self.validIDs.add(5) #Convert op
-
     def apply(self, contexts, runtime, ops, baseIntervals, partitioners, strategies):
+        fusable_intervals = []
+        fires=0
+        results = [int(op._task_id) in self.validIDs for op in ops]
+        for baseInterval in baseIntervals:
+            start, end = baseInterval[0], baseInterval[0]
+            while end<baseInterval[1]:
+                result = results[end]
+                if result:
+                    end=end+1
+                else:
+                    if start==end:
+                        fusable_intervals.append((start, start+1))
+                        #print("valid",start, start+1) 
+                        start = start+1
+                        end = start
+                        fires+=1
+                    else:
+                        fusable_intervals.append((start, end))
+                        #print("valid",start, end) 
+                        start=end
+                    fires+=1
+                    #end = start
+            if start<end:
+                fusable_intervals.append((start,end))
+        #print("no communication")
+        #print("baseIntervals", "(0, "+str(len(ops))+")")
+        #print("newIntervals", fusable_intervals)
+        return fusable_intervals, fires
+
+
+
+    def apply2(self, contexts, runtime, ops, baseIntervals, partitioners, strategies):
         fusable_intervals = []
         fires=0
         results = [int(op._task_id) in self.validIDs for op in ops]
@@ -880,13 +912,13 @@ class AllValidOps(FusionConstraint):
                         print("valid",start, start+1) 
                         fires+=1
                         start=start+1
-                        end = start
+                        #end = start
             if start<end:
                 fusable_intervals.append((start,end))
         #print("no communication")
         #print("baseIntervals", "(0, "+str(len(ops))+")")
         #print("newIntervals", fusable_intervals)
-        return fusable_intervals
+        return fusable_intervals, fires
 
 
 class IdenticalProjection(FusionConstraint):
@@ -931,7 +963,7 @@ class IdenticalProjection(FusionConstraint):
                     else: #we see a new projection for the same buffer
                         if not np.array_equal(matrix, store_to_ops[buffer]):
                             intervals.append((start, i))
-                            print("projection", start, i)
+                            #print("projection", start, i)
                             fires+=1
                             #print("bad proj",i, store_to_ops3[buffer], buffer, proj, store_to_ops2[buffer])
                             start=i
@@ -944,7 +976,7 @@ class IdenticalProjection(FusionConstraint):
         #print("projection")
         #print("baseIntervals", baseIntervals)
         #print("newIntervals", intervals)
-        return intervals
+        return intervals, fires
 
 
 class IdenticalLaunchShapes(FusionConstraint):
@@ -966,7 +998,7 @@ class IdenticalLaunchShapes(FusionConstraint):
                 rightNone = launch_shapes[i-1] is None and (launch_shapes[i] is not None)
                 if leftNone or rightNone or launch_shapes[i]!=launch_shapes[i-1]:
                     intervals.append((start, i))
-                    print("launch_space", start, i)
+                    #print("launch_space", start, i)
                     fires+=1
                     start=i
                     i=start+1
@@ -977,7 +1009,7 @@ class IdenticalLaunchShapes(FusionConstraint):
         #print("launch")
         #print("baseIntervals", baseIntervals)
         #print("newIntervals", intervals)
-        return intervals
+        return intervals, fires
 
 
 class ValidProducerConsumer(FusionConstraint):
@@ -1006,10 +1038,11 @@ class ValidProducerConsumer(FusionConstraint):
                     if inputRoot in childMap:
                         isSame = isSame and childMap[inputRoot] == input
 
-                if not isSame:                     
-                    intervals.append((start, i))
-                    print("producer_consumer", start, i)
-                    fires+=1
+                if not isSame:           
+                    if start!=i:
+                        intervals.append((start, i))
+                        #print("producer_consumer", start, i)
+                        fires+=1
                     start=i
                     i=start+1
                     childMap = {}
@@ -1026,7 +1059,7 @@ class ValidProducerConsumer(FusionConstraint):
         #print("producer-consumer")
         #print("baseIntervals", baseIntervals)
         #print("newIntervals", intervals)
-        return intervals
+        return intervals, fires
  
 
 
@@ -1075,6 +1108,7 @@ class Runtime(object):
         self._outstanding_ops = []
         self._metric_window = []
         self._flen_metric_window = []
+        self._fireMetrics = [0,0,0,0]
 
         self._window_size=50
         self._window_size = self._core_context.get_tunable(
@@ -1176,13 +1210,41 @@ class Runtime(object):
         # Before we clean up the runtime, we should execute all outstanding
         # operations.
         self.flush_scheduling_window()
-        print("metric window:", self._metric_window)
-        print("fused lens", self._flen_metric_window)
-        import pickle
-        with open("window_metrics", "wb") as fp:
-            pickle.dump(self._metric_window, fp)
-        with open("fused_metrics", "wb") as fp:
-            pickle.dump(self._flen_metric_window, fp)
+        #print("metric window:", self._metric_window)
+        #print("fused lens", self._flen_metric_window)
+        ftot = 0
+        fmax = -1
+        fmin = 1000
+        tot=0
+        allt=0
+        if self._window_size>1:
+            for met in self._flen_metric_window:
+                fmax  = max(fmax, met)
+                allt+=met
+                if met!=1:
+                    ftot += met
+                    tot+=1
+                    fmin = min(fmin, met)
+            print("avg fusion size", float(ftot)/float(tot))
+            print("min fusion size", fmin)
+            print("max fusion size", fmax)
+            print('fusion ratio', float(ftot)/float(allt))
+
+            allTriggers = sum(self._fireMetrics)
+            if allTriggers==0:
+                print("no constraints triggered")
+            else:
+                for i,nFire in enumerate(self._fireMetrics):
+                    print("trigger "+str(i)+" fire share ", float(nFire)/float(allTriggers))
+            
+            for i,nFire in enumerate(self._fireMetrics):
+                print("trigger "+str(i)+" fire count ", float(nFire))
+            print("total fires", allTriggers)
+            import pickle
+            with open("window_metrics", "wb") as fp:
+                pickle.dump(self._metric_window, fp)
+            with open("fused_metrics", "wb") as fp:
+                pickle.dump(self._flen_metric_window, fp)
         # Destroy all libraries. Note that we should do this
         # from the lastly added one to the first one
         for context in reversed(self._context_list):
@@ -1266,13 +1328,14 @@ class Runtime(object):
     def build_fused_op(self,ops):
 
         fusion_checker = FusionChecker(ops, self._contexts, self)
-        fusion_checker.register_constraint(cuNumericContextExists())
+        #fusion_checker.register_constraint(cuNumericContextExists())
         fusion_checker.register_constraint(AllValidOps())
         fusion_checker.register_constraint(IdenticalLaunchShapes())
         fusion_checker.register_constraint(ValidProducerConsumer())
         fusion_checker.register_constraint(IdenticalProjection())
-        can_fuse,fusable_sets, partitions, keyps = fusion_checker.can_fuse()
-                
+        can_fuse,fusable_sets, partitions, keyps, fireMetrics = fusion_checker.can_fuse()
+        for i in range(4):
+            self._fireMetrics[i]+=fireMetrics[i]        
         #once fusion in the core is playing nicely with the mapepr
         #the following two lines will be removed, and be replaced 
         #with the 2 subsequent (commented out) lines
@@ -1343,7 +1406,7 @@ class Runtime(object):
 
     def _schedule(self, ops, force_eval=False):
         ids = [op._task_id for op in ops]
-        print(ids)
+        #print(ids)
         #case 1: try fusing current window of tasks
         strats = False
 
